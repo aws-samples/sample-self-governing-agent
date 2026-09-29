@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Storage and enforcement infrastructure for the self-governing agent:
+  the execution-profile history that feeds adaptive budgets, and the
+  session-budget counter that the gateway interceptor increments.
+
+Parameters:
+  ProfileRetentionDays:
+    Type: Number
+    Default: 90
+    Description: Days of execution history retained before TTL expiry.
+  SessionBudgetTtlSeconds:
+    Type: Number
+    Default: 86400
+    Description: >
+      Seconds a session counter survives. Only needs to outlive the longest
+      possible agent session; the interceptor stamps this on each item's ttl
+      attribute so counters self-clean without a sweeper.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Execution profile history. Read by adaptive_limit_engine.load_observations,
+  # written by feedback_writer.record_execution_profile.
+  #
+  # Key schema is (tier, ts) because every read is "recent history for one
+  # tier" — a range query on the sort key, newest first. This is the reason
+  # telemetry lives here rather than in AgentCore Memory: the access pattern is
+  # an exact-match partition plus a time range, not semantic recall.
+  # ---------------------------------------------------------------------------
+  ExecutionProfileTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: agent-execution-profiles
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: tier
+          AttributeType: S
+        - AttributeName: ts
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tier
+          KeyType: HASH
+        - AttributeName: ts
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Component
+          Value: self-governing-agent
+        - Key: Purpose
+          Value: adaptive-budget-telemetry
+
+  # ---------------------------------------------------------------------------
+  # Session budget counters. Written by the gateway interceptor via a single
+  # conditional UpdateItem per tool call.
+  #
+  # Partitioned on session_id alone, so each agent session is one item and the
+  # conditional increment is a single-item atomic operation — no transaction, no
+  # read-then-write race. Two concurrent tool calls in the same session cannot
+  # both pass a `tool_calls < ceiling` condition on the same value.
+  # ---------------------------------------------------------------------------
+  SessionBudgetTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: agent-session-budgets
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Component
+          Value: self-governing-agent
+        - Key: Purpose
+          Value: session-budget-enforcement
+
+  # ---------------------------------------------------------------------------
+  # The interceptor Lambda. Sits in the gateway's REQUEST path, so its latency
+  # is on every tool call — keep it a single DynamoDB write and nothing else.
+  # ---------------------------------------------------------------------------
+  BudgetInterceptorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        # Scoped log permissions instead of the broad Lambda basic-execution
+        # managed policy. Mirrors iam/interceptor-lambda-policy.json but tightens
+        # the log resource to this function's own log group.
+        - PolicyName: interceptor-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/agent-budget-interceptor:*"
+        - PolicyName: session-budget-counter
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # UpdateItem only. The interceptor never reads the counter
+              # separately and never deletes it (TTL does that), so anything
+              # beyond UpdateItem is unnecessary authority.
+              - Effect: Allow
+                Action: dynamodb:UpdateItem
+                Resource: !GetAtt SessionBudgetTable.Arn
+
+  BudgetInterceptorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: agent-budget-interceptor
+      Runtime: python3.12
+      Handler: budget_interceptor.handler
+      Role: !GetAtt BudgetInterceptorRole.Arn
+      Timeout: 5
+      MemorySize: 256
+      # Bound blast radius: this function is in the REQUEST path of every tool
+      # call, so cap its concurrency to stop an unbounded spike from exhausting
+      # account-wide Lambda concurrency. Tune to expected throughput.
+      ReservedConcurrentExecutions: 100
+      Environment:
+        Variables:
+          # Names must match what budget_interceptor.py reads from os.environ.
+          BUDGET_TABLE: !Ref SessionBudgetTable
+          BUDGET_TTL_SECONDS: !Ref SessionBudgetTtlSeconds
+      Code:
+        ZipFile: |
+          # Placeholder. Deploy src/interceptor/budget_interceptor.py here —
+          # inlined code is kept out of this template so the enforcement logic
+          # has exactly one source of truth.
+          def handler(event, context):
+              raise NotImplementedError("deploy src/interceptor/budget_interceptor.py")
+      Tags:
+        - Key: Component
+          Value: self-governing-agent
+
+  BudgetInterceptorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt BudgetInterceptorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+Outputs:
+  ProfileTableName:
+    Value: !Ref ExecutionProfileTable
+    Description: Set as PROFILE_TABLE for the agent runtime.
+  SessionBudgetTableName:
+    Value: !Ref SessionBudgetTable
+    Description: Set as BUDGET_TABLE for the interceptor.
+  InterceptorArn:
+    Value: !GetAtt BudgetInterceptorFunction.Arn
+    Description: Pass to `python -m src.policy_setup --interceptor-arn`.

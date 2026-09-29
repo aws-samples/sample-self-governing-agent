@@ -1,0 +1,47 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AgentCoreRuntimeInvoke",
+      "Effect": "Allow",
+      "Action": ["bedrock-agentcore:InvokeAgentRuntime"],
+      "Resource": "arn:aws:bedrock-agentcore:*:*:runtime/*"
+    },
+    {
+      "Sid": "BedrockModelInvokeViaInferenceProfile",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": [
+        "arn:aws:bedrock:*:*:inference-profile/*",
+        "arn:aws:bedrock:*::foundation-model/*"
+      ]
+    },
+    {
+      "Sid": "GovernanceTelemetryTable",
+      "Effect": "Allow",
+      "Action": ["dynamodb:Query", "dynamodb:PutItem"],
+      "Resource": "arn:aws:dynamodb:*:*:table/agent-execution-profiles"
+    },
+    {
+      "Sid": "SessionTokenMinting",
+      "Effect": "Allow",
+      "Action": ["cognito-idp:InitiateAuth"],
+      "Resource": "arn:aws:cognito-idp:*:*:userpool/*"
+    },
+    {
+      "Sid": "GovernanceMetrics",
+      "Effect": "Allow",
+      "Action": ["cloudwatch:PutMetricData"],
+      "Condition": {
+        "StringEquals": {"cloudwatch:namespace": "SelfGoverningAgent/Governance"}
+      },
+      "Resource": "*"
+    },
+    {
+      "Sid": "AgentLogs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/*"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+# Runtime
+bedrock-agentcore>=1.18.1
+strands-agents>=1.48.0
+boto3>=1.43.0
+
+# Deployment CLI — provides the `agentcore` command used to create and launch
+# the runtime and gateway (phase 1 of the two-phase Cedar deploy).
+bedrock-agentcore-starter-toolkit>=0.1.13
+
+# Policy verification (tests only) — Cedar reference engine, used to evaluate
+# authorization decisions locally without deploying a gateway.
+cedarpy>=3.4.0
